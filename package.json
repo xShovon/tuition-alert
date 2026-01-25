@@ -1,0 +1,12 @@
+{
+  "name": "tuition-alert",
+  "version": "1.0.0",
+  "main": "alert.js",
+  "dependencies": {
+    "axios": "^0.27.2",
+    "cheerio": "^1.0.0-rc.12"
+  },
+  "scripts": {
+    "start": "node alert.js"
+  }
+}
