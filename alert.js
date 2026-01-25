@@ -109,31 +109,45 @@ function extractFromStyle2(text) {
     // METHOD 1: Handle new Style 1 & 2 - paragraph-based structure
     $("p.wp-block-paragraph").each((_, p) => {
       const text = $(p).text().trim();
+      const html = $(p).html();
       
       // Skip empty paragraphs
       if (!text) return;
       
       let extractedData = null;
       
-      // Check if it's Style 1 (contains emojis and specific format)
-      if (text.includes("📍") || text.includes("💰") || text.includes("📲")) {
+      // Check if it's Style 1 (contains emoji images OR Unicode emojis)
+      const hasEmojiImages = html && (html.includes('alt="📍"') || html.includes('alt="💰"') || html.includes('alt="📲"') || html.includes('class="emoji"'));
+      const hasUnicodeEmojis = text.includes("📍") || text.includes("💰") || text.includes("📲");
+      const hasBengaliPattern = /[\u0980-\u09FF]/.test(text); // Bengali Unicode range
+      
+      if (hasEmojiImages || hasUnicodeEmojis || (hasBengaliPattern && text.includes('|'))) {
         extractedData = extractFromStyle1(text);
+        console.log(`Detected Style 1 (Bengali/Emoji): ${extractedData?.code}`);
       }
       // Check if it's Style 2 (starts with BMS code and has quotes or wa.me link)
       else if (text.match(/BMS\d+/i) && (text.includes('"') || text.includes("wa.me"))) {
         extractedData = extractFromStyle2(text);
+        // Only log if we find a match to reduce noise
       }
       
       if (extractedData && extractedData.description) {
-        // Check keywords in the location and description (case-insensitive)
-        const searchText = `${extractedData.location} ${extractedData.description}`.toLowerCase();
-        const matchesKeyword = KEYWORDS.some((keyword) =>
-          searchText.includes(keyword.toLowerCase())
-        );
+        // Check keywords in the location and description (case-insensitive for English, exact for Bengali)
+        const searchText = `${extractedData.location} ${extractedData.description}`;
+        const matchesKeyword = KEYWORDS.some((keyword) => {
+          // For Bengali keywords, do exact match; for English, case-insensitive
+          if (/[\u0980-\u09FF]/.test(keyword)) {
+            return searchText.includes(keyword);
+          } else {
+            return searchText.toLowerCase().includes(keyword.toLowerCase());
+          }
+        });
 
         if (matchesKeyword) {
           console.log(`Found matching update: ${extractedData.code}`);
           updates.push(extractedData.fullText);
+        } else {
+          console.log(`No keyword match for: ${extractedData.code} - ${extractedData.location}`);
         }
       }
     });
@@ -168,19 +182,24 @@ function extractFromStyle2(text) {
       }
     });
 
-    // METHOD 3: Fallback - look for any paragraph containing BMS codes and keywords
+    // METHOD 3: Fallback - look for any paragraph containing BMS codes and keywords (including Bengali text)
     if (updates.length === 0) {
       console.log("No updates found with primary methods, trying fallback...");
       
       $("p").each((_, p) => {
         const text = $(p).text().trim();
         
-        // Look for BMS codes
-        if (text.match(/BMS\d+/i)) {
+        // Look for BMS codes OR Bengali tuition patterns
+        if (text.match(/BMS\d+/i) || /[\u0980-\u09FF]/.test(text)) {
           const searchText = text.toLowerCase();
-          const matchesKeyword = KEYWORDS.some((keyword) =>
-            searchText.includes(keyword.toLowerCase())
-          );
+          const matchesKeyword = KEYWORDS.some((keyword) => {
+            // For Bengali keywords, do exact match; for English, case-insensitive
+            if (/[\u0980-\u09FF]/.test(keyword)) {
+              return text.includes(keyword);
+            } else {
+              return searchText.includes(keyword.toLowerCase());
+            }
+          });
 
           if (matchesKeyword) {
             console.log(`Found fallback update: ${text.substring(0, 50)}...`);
@@ -189,6 +208,37 @@ function extractFromStyle2(text) {
         }
       });
     }
+
+    // METHOD 4: Enhanced search for all paragraphs with Bengali text and relevant keywords
+    console.log("Checking for Bengali content...");
+    $("p").each((_, p) => {
+      const text = $(p).text().trim();
+      
+      // Skip if already processed or empty
+      if (!text || updates.some(update => update.includes(text.substring(0, 30)))) return;
+      
+      // Look for Bengali text with tuition-related keywords
+      if (/[\u0980-\u09FF]/.test(text)) {
+        // Check for tuition-related Bengali words or numbers
+        const hasTuitionKeywords = text.includes('ক্লাস') || text.includes('টিউশন') || text.includes('শিক্ষক') || 
+                                  text.includes('ছাত্র') || text.includes('পড়ান') || /\d+k/.test(text) || /\d+\/\d+/.test(text);
+        
+        if (hasTuitionKeywords) {
+          const matchesLocation = KEYWORDS.some((keyword) => {
+            if (/[\u0980-\u09FF]/.test(keyword)) {
+              return text.includes(keyword);
+            } else {
+              return text.toLowerCase().includes(keyword.toLowerCase());
+            }
+          });
+          
+          if (matchesLocation) {
+            console.log(`Found Bengali tuition: ${text.substring(0, 100)}...`);
+            updates.push(text);
+          }
+        }
+      }
+    });
 
     console.log(`Total updates found: ${updates.length}`);
 
