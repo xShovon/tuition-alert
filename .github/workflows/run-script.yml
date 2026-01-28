@@ -2,12 +2,8 @@ name: Run Website Monitor Script
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # Every 30 minutes
+    - cron: "*/30 * * * *"  # Every 15 minutes
   workflow_dispatch:
-
-permissions:
-  contents: write
-  actions: read
 
 jobs:
   monitor:
@@ -16,8 +12,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -38,11 +32,7 @@ jobs:
       - name: Commit updated sent_updates.json
         run: |
           git add sent_updates.json
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Update sent_updates.json"
-            git push
-          fi
+          git diff --cached --quiet || git commit -m "Update sent_updates.json"
+          git push
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
