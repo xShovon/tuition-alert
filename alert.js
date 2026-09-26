@@ -1,101 +1,48 @@
-"use strict";
-
 const axios = require("axios");
 const cheerio = require("cheerio");
-const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-require("dotenv").config();
 
-/*
-|--------------------------------------------------------------------------
-| Configuration
-|--------------------------------------------------------------------------
-*/
+// ============================================================
+// CONFIG
+// ============================================================
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHAT_ID = process.env.CHAT_ID;
+// IMPORTANT:
+// The previous bot token was exposed. Generate a NEW token using
+// @BotFather and put the new token below.
+const BOT_TOKEN = "7453745620";
+const CHAT_ID = "5659693980";
 
-const TARGET_URL =
-  process.env.TARGET_URL || "https://dhakatuitionbd.com/bm/";
-
-const STATE_PATH = path.join(
-  __dirname,
-  process.env.STATE_FILE || "sent_updates.json"
-);
-
-// Send currently-existing matching listings when state file is brand new.
-// false = establish baseline without sending a flood of old listings.
-const SEND_EXISTING_ON_FIRST_RUN =
-  String(process.env.SEND_EXISTING_ON_FIRST_RUN || "false").toLowerCase() ===
-  "true";
-
-// true = send an alert if the same BMS code's content changes later.
-const ALERT_ON_CHANGE =
-  String(process.env.ALERT_ON_CHANGE || "false").toLowerCase() === "true";
-
-// Delay between Telegram messages.
-// Telegram has rate limits, so don't hammer the API.
-const TELEGRAM_DELAY_MS = Number(
-  process.env.TELEGRAM_DELAY_MS || 1200
-);
-
-// Maximum Telegram message size.
-// Telegram allows about 4096 chars for text messages.
-// Keep a little safety margin.
-const TELEGRAM_MAX_LENGTH = 3900;
-
-// Request timeout.
-const HTTP_TIMEOUT_MS = Number(
-  process.env.HTTP_TIMEOUT_MS || 15000
-);
-
-/*
-|--------------------------------------------------------------------------
-| Location keywords
-|--------------------------------------------------------------------------
-| Add/remove locations here.
-|--------------------------------------------------------------------------
-*/
+const TARGET_URL = "https://dhakatuitionbd.com/bm/";
 
 const KEYWORDS = [
   // English
   "dhanmondi",
   "mohammadpur",
-  "muhammadpur",
   "farmgate",
   "firmgate",
+  "farm gate",
+  "firm gate",
   "jigatola",
-  "jigatala",
+  "zigatola",
   "mohakhali",
   "badda",
-  "east badda",
-  "south badda",
-  "north badda",
-  "uttar badda",
   "rampura",
   "mirpur",
-  "mirpur 1",
-  "mirpur 2",
-  "mirpur 6",
-  "mirpur 10",
-  "mirpur 14",
   "adabor",
   "shamoli",
-  "shemoli",
-  "semoli",
+  "shyamoli",
   "lalmatia",
   "tejgaon",
-  "tejturi bazar",
-  "lalmatia",
-  "hazaribag",
-  "hazaribagh",
+  "norda",
+  "chandrima",
+  "bijoy",
 
   // Bengali
   "বাড্ডা",
   "জিগাতলা",
-  "জিগাতোলা",
   "শেওড়াপাড়া",
+  "শেওড়াপাড়া",
   "শ্যামলী",
   "রামপুরা",
   "নর্দা",
@@ -103,487 +50,498 @@ const KEYWORDS = [
   "চন্দ্রিমা",
   "মহাখালী",
   "লালমাটিয়া",
+  "লালমাটিয়া",
   "ধানমন্ডি",
-  "বিজয়"
+  "বিজয়",
+  "বিজয়",
 ];
 
-/*
-|--------------------------------------------------------------------------
-| Validation
-|--------------------------------------------------------------------------
-*/
+// Always store state next to this script, not relative to the
+// directory from which Node happens to be launched.
+const SENT_UPDATES_PATH = path.join(__dirname, "sent_updates.json");
 
-if (!BOT_TOKEN) {
-  console.error("ERROR: BOT_TOKEN is missing.");
-  console.error("Create a .env file and add BOT_TOKEN=...");
-  process.exit(1);
-}
+// ============================================================
+// HELPERS
+// ============================================================
 
-if (!CHAT_ID) {
-  console.error("ERROR: CHAT_ID is missing.");
-  console.error("Create a .env file and add CHAT_ID=...");
-  process.exit(1);
-}
-
-/*
-|--------------------------------------------------------------------------
-| Helpers
-|--------------------------------------------------------------------------
-*/
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function normalizeText(text) {
+function normalizeWhitespace(text) {
   return String(text || "")
-    .replace(/\u00a0/g, " ")
+    .replace(/\u200B|\u200C|\u200D|\uFEFF/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function normalizeSearchText(text) {
-  return normalizeText(text)
-    .toLowerCase()
-    .replace(/[|,.;:_/\\()[\]{}#@!?]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function cleanText(text) {
+  return normalizeWhitespace(
+    String(text || "")
+      // Remove visible wa.me links from the description
+      .replace(/https?:\/\/wa\.me\/\S+/gi, "")
+  );
 }
 
-function sha256(value) {
-  return crypto
-    .createHash("sha256")
-    .update(String(value), "utf8")
-    .digest("hex");
-}
-
-function extractBmsCode(text) {
+// Supports:
+// BMS1148
+// BMS9199
+// BMS9199B
+// BMS9199A
+function extractCode(text) {
   const match = String(text || "").match(/\bBMS\d+[A-Za-z]?\b/i);
   return match ? match[0].toUpperCase() : "";
 }
 
-function extractPhoneNumber(text) {
-  if (!text) return "";
+// Extract Bangladesh phone numbers in formats such as:
+//
+// +8801410544502
+// +880 1410544502
+// +880 1410-544502
+// 01410-544502
+// https://wa.me/+8801410544502
+// Message code to To +8801410544502
+function extractContact(text) {
+  const source = String(text || "");
 
-  // +880 1629023242
-  // +880-1629023242
-  // +8801629023242
-  const intlMatch = text.match(/\+880[\s-]?\d{10}/);
+  // International format
+  let match = source.match(/\+880[\s-]?1[3-9](?:[\s-]?\d){8}/i);
 
-  if (intlMatch) {
-    return intlMatch[0]
-      .replace(/[\s-]/g, "")
-      .trim();
+  if (match) {
+    return match[0].replace(/[\s-]/g, "");
   }
 
-  // Local Bangladeshi mobile format: 01XXXXXXXXX
-  const localMatch = text.match(/\b01\d{9}\b/);
+  // wa.me/880... or wa.me/+880...
+  match = source.match(/wa\.me\/\+?880[\s-]?1[3-9](?:[\s-]?\d){8}/i);
 
-  if (localMatch) {
-    return localMatch[0];
+  if (match) {
+    let number = match[0]
+      .replace(/^wa\.me\//i, "")
+      .replace(/[\s-]/g, "");
+
+    if (!number.startsWith("+")) {
+      number = "+" + number;
+    }
+
+    return number;
+  }
+
+  // Local Bangladesh mobile number
+  match = source.match(/\b01[3-9](?:[\s-]?\d){8}\b/);
+
+  if (match) {
+    const local = match[0].replace(/[\s-]/g, "");
+
+    // Convert 01XXXXXXXXX -> +8801XXXXXXXXX
+    return "+880" + local.substring(1);
   }
 
   return "";
 }
 
-function extractContact(text, html = "") {
-  const combined = `${text || ""} ${html || ""}`;
+function containsKeyword(text) {
+  const searchText = normalizeWhitespace(text).toLowerCase();
 
-  /*
-   * Match WhatsApp URLs such as:
-   * https://wa.me/+8801410544502
-   * https://wa.me/8801410544502
-   */
-  const waMatch = combined.match(
-    /wa\.me\/(?:\+)?(\d{10,15})/i
-  );
-
-  if (waMatch) {
-    return `+${waMatch[1]}`;
-  }
-
-  // Match text phone number.
-  return extractPhoneNumber(text);
+  return KEYWORDS.some((keyword) => {
+    const normalizedKeyword = normalizeWhitespace(keyword).toLowerCase();
+    return searchText.includes(normalizedKeyword);
+  });
 }
 
-function cleanDescription(text) {
-  let value = normalizeText(text);
-
-  /*
-   * Remove the message-code/contact tail.
-   *
-   * Examples:
-   * Message code to To +8801410544502
-   * Contact: Message code to To +8801410544502
-   */
-  value = value.replace(
-    /\s*\|?\s*Contact\s*:\s*Message code.*$/i,
-    ""
+function removeCodeFromText(text) {
+  return cleanText(
+    String(text || "").replace(/\bBMS\d+[A-Za-z]?\b/i, "")
   );
-
-  value = value.replace(
-    /\s+Message code\s+to\s+To\s+\+?880[\s-]?\d{10,}$/i,
-    ""
-  );
-
-  value = value.replace(
-    /\s+Message code.*$/i,
-    ""
-  );
-
-  value = normalizeText(value);
-
-  return value;
 }
 
+// Try to identify the location from a description.
+// Examples:
+//
+// Dhanmondi Central Road class 6...
+// -> Dhanmondi Central Road
+//
+// Eskaton Garden Cls 10...
+// -> Eskaton Garden
+//
+// Dhanmondi 15 | Class 8...
+// -> Dhanmondi 15
 function extractLocation(description) {
-  if (!description) return "";
+  const text = normalizeWhitespace(description);
 
-  let text = normalizeText(description);
+  if (!text) return "";
 
-  // Remove BMS code if still present.
-  text = text.replace(
-    /^\s*BMS\d+[A-Za-z]?\s*/i,
-    ""
-  );
-
-  /*
-   * Preferred format:
-   *
-   * BMS9234 Badda Satarkul, Badda | Class 12 ...
-   *
-   * Then location is the first pipe section.
-   */
+  // Prefer pipe-separated structure.
   if (text.includes("|")) {
-    const firstPart = text.split("|")[0];
-    return normalizeText(firstPart);
+    const firstPart = text.split("|")[0].trim();
+    if (firstPart) {
+      return firstPart;
+    }
   }
 
-  /*
-   * For plain format:
-   *
-   * Dhanmondi Central Road class 6, ...
-   *
-   * Take everything before class/SSC/HSC/etc.
-   */
+  // Stop before common academic markers.
   const locationMatch = text.match(
-    /^(.+?)(?=\s+(?:cls|class|classs|ssc|hsc|o\s*lvl|medical\s+admission|admission|ielts|undergraduate)\b)/i
+    /^(.+?)(?=\s+(?:Cls|Class|HSC|SSC|JSC|KG|Nursery|Honours|Honors)\b|,\s*(?:Class|Cls)\b)/i
   );
 
-  if (locationMatch) {
-    return normalizeText(locationMatch[1]);
+  if (locationMatch && locationMatch[1]) {
+    return locationMatch[1].trim();
   }
 
-  /*
-   * Fallback: use the beginning of the record.
-   */
-  const fallback = text.split(",")[0];
-
-  return normalizeText(
-    fallback.substring(0, 150)
-  );
+  // Fallback: first reasonable chunk.
+  return text.split(",")[0].trim();
 }
 
-function matchesKeyword(record) {
-  const searchText = normalizeSearchText(
-    `${record.location} ${record.description}`
-  );
+function buildFullText(code, description, contact, date = "") {
+  const parts = [];
 
-  for (const keyword of KEYWORDS) {
-    const normalizedKeyword = normalizeSearchText(keyword);
+  if (code) parts.push(code);
+  if (description) parts.push(description);
+  if (contact) parts.push(`Contact: ${contact}`);
+  if (date) parts.push(date);
 
-    if (!normalizedKeyword) {
-      continue;
-    }
+  return parts.join(" | ").replace(/\|\s*\|/g, " | ").trim();
+}
 
-    // Bengali / non-Latin: direct substring matching.
-    if (/[\u0980-\u09FF]/.test(keyword)) {
-      if (searchText.includes(normalizedKeyword)) {
-        return true;
-      }
-      continue;
-    }
+function makeRecord(rawText) {
+  const originalText = normalizeWhitespace(rawText);
 
-    /*
-     * English:
-     *
-     * Use substring matching rather than strict word boundaries
-     * because the site has inconsistent punctuation/spelling.
-     *
-     * Example:
-     * "Mirpur-14"
-     * "Mirpur 14"
-     * "Dhanmondi7A"
-     */
-    if (searchText.includes(normalizedKeyword)) {
-      return true;
-    }
+  if (!originalText) {
+    return null;
   }
 
-  return false;
-}
-
-function extractRecord(text, html = "") {
-  const normalized = normalizeText(text);
-
-  const code = extractBmsCode(normalized);
+  const code = extractCode(originalText);
 
   if (!code) {
     return null;
   }
 
-  let description = normalized
+  let description = originalText;
+
+  // Remove BMS code
+  description = removeCodeFromText(description);
+
+  // Remove common contact suffixes from description
+  description = description
     .replace(
-      new RegExp(`^\\s*${code}\\s*`, "i"),
+      /(?:message\s*code(?:\s+to)?(?:\s+to)?|whatsapp\s*code|contact)\s*:?\s*.*$/i,
       ""
     )
     .trim();
 
-  const contact = extractContact(normalized, html);
+  // Remove trailing separators
+  description = description.replace(/\|\s*$/g, "").trim();
 
-  description = cleanDescription(description);
-
-  if (!description) {
-    return null;
-  }
+  const contact = extractContact(originalText);
 
   const location = extractLocation(description);
 
-  const fullTextParts = [
+  const fullText = buildFullText(
     code,
-    location ? `Location: ${location}` : "",
     description,
-    contact ? `Contact: ${contact}` : ""
-  ].filter(Boolean);
-
-  const fullText = fullTextParts.join(" | ");
+    contact
+  );
 
   return {
     code,
     location,
     description,
     contact,
-    fullText
+    fullText,
   };
 }
 
-/*
-|--------------------------------------------------------------------------
-| HTTP
-|--------------------------------------------------------------------------
-*/
+// ============================================================
+// LOAD SENT UPDATES
+// ============================================================
+
+let sentUpdates = [];
+
+if (fs.existsSync(SENT_UPDATES_PATH)) {
+  try {
+    const raw = fs.readFileSync(SENT_UPDATES_PATH, "utf8");
+
+    const parsed = JSON.parse(raw);
+
+    if (Array.isArray(parsed)) {
+      sentUpdates = parsed;
+    } else if (parsed && typeof parsed === "object") {
+      // Support object format in case you later change state format.
+      sentUpdates = Object.values(parsed);
+    }
+  } catch (error) {
+    console.warn(
+      "Could not parse sent_updates.json — starting fresh."
+    );
+
+    sentUpdates = [];
+  }
+}
+
+// Convert old sent strings to a quick lookup set.
+const sentTextSet = new Set(
+  sentUpdates
+    .filter((item) => typeof item === "string")
+    .map((item) => normalizeWhitespace(item))
+);
+
+// Build lookup by BMS code.
+// This makes old sent_updates.json files compatible.
+const sentCodeSet = new Set();
+
+for (const item of sentUpdates) {
+  if (typeof item !== "string") continue;
+
+  const code = extractCode(item);
+
+  if (code) {
+    sentCodeSet.add(code);
+  }
+}
+
+// ============================================================
+// FETCH WEBSITE
+// ============================================================
 
 async function fetchWebsiteContent() {
   const response = await axios.get(TARGET_URL, {
-    timeout: HTTP_TIMEOUT_MS,
-
+    timeout: 15000,
     headers: {
       "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-        "Chrome/153.0 Safari/537.36",
-      "Accept":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+      Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language":
-        "en-US,en;q=0.9,bn;q=0.8"
-    }
+    },
   });
 
   return response.data;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Scraping - Paragraph based
-|--------------------------------------------------------------------------
-*/
+// ============================================================
+// TELEGRAM
+// ============================================================
+
+async function sendTelegramMessage(message) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+
+  // Telegram has a message length limit.
+  const MAX_LENGTH = 4000;
+
+  const chunks = [];
+
+  if (message.length <= MAX_LENGTH) {
+    chunks.push(message);
+  } else {
+    let remaining = message;
+
+    while (remaining.length > MAX_LENGTH) {
+      let splitAt = remaining.lastIndexOf("\n", MAX_LENGTH);
+
+      if (splitAt <= 0) {
+        splitAt = remaining.lastIndexOf(" ", MAX_LENGTH);
+      }
+
+      if (splitAt <= 0) {
+        splitAt = MAX_LENGTH;
+      }
+
+      chunks.push(remaining.substring(0, splitAt));
+      remaining = remaining.substring(splitAt).trim();
+    }
+
+    if (remaining) {
+      chunks.push(remaining);
+    }
+  }
+
+  for (const chunk of chunks) {
+    try {
+      await axios.post(
+        url,
+        {
+          chat_id: CHAT_ID,
+          text: chunk,
+          disable_web_page_preview: true,
+        },
+        {
+          timeout: 15000,
+        }
+      );
+    } catch (error) {
+      console.error(
+        "Telegram error:",
+        error.response?.data || error.message
+      );
+
+      throw error;
+    }
+  }
+}
+
+// ============================================================
+// PARAGRAPH SCRAPER
+// ============================================================
 
 function extractParagraphRecords($) {
   const records = [];
 
-  const paragraphs = $("p").toArray();
+  const paragraphs = $("p.wp-block-paragraph");
 
-  for (let i = 0; i < paragraphs.length; i++) {
-    const current = $(paragraphs[i]);
+  let currentRecordParts = [];
 
-    const currentText = normalizeText(
-      current.text()
-    );
-
-    const currentHtml =
-      current.html() || "";
-
-    const currentCode =
-      extractBmsCode(currentText);
-
-    /*
-     * Ignore paragraphs that don't begin/contain a BMS record.
-     */
-    if (!currentCode) {
-      continue;
+  function finalizeCurrentRecord() {
+    if (currentRecordParts.length === 0) {
+      return;
     }
 
-    let combinedText = currentText;
-    let combinedHtml = currentHtml;
+    const combined = currentRecordParts
+      .map((item) => normalizeWhitespace(item))
+      .filter(Boolean)
+      .join(" | ");
 
-    /*
-     * Some versions of the website put:
-     *
-     * BMSxxxx ...
-     *
-     * Message code ...
-     *
-     * into separate paragraphs.
-     *
-     * Add only obvious continuation paragraphs.
-     */
-    for (let j = i + 1; j < paragraphs.length; j++) {
-      const next = $(paragraphs[j]);
-
-      const nextText = normalizeText(
-        next.text()
-      );
-
-      const nextHtml =
-        next.html() || "";
-
-      if (!nextText) {
-        continue;
-      }
-
-      // Stop when the next actual tuition record starts.
-      if (extractBmsCode(nextText)) {
-        break;
-      }
-
-      const isMessageContinuation =
-        /message\s+code/i.test(nextText) ||
-        /whatsapp/i.test(nextText) ||
-        /wa\.me/i.test(nextHtml) ||
-        /\+880[\s-]?\d{10}/.test(nextText) ||
-        /\b01\d{9}\b/.test(nextText);
-
-      if (!isMessageContinuation) {
-        break;
-      }
-
-      combinedText += ` ${nextText}`;
-      combinedHtml += ` ${nextHtml}`;
-    }
-
-    const record = extractRecord(
-      combinedText,
-      combinedHtml
-    );
+    const record = makeRecord(combined);
 
     if (record) {
       records.push(record);
     }
+
+    currentRecordParts = [];
   }
+
+  paragraphs.each((_, p) => {
+    const text = normalizeWhitespace($(p).text());
+
+    if (!text) {
+      return;
+    }
+
+    const hasCode = /\bBMS\d+[A-Za-z]?\b/i.test(text);
+
+    // A new BMS code means a new tuition record.
+    if (hasCode) {
+      finalizeCurrentRecord();
+
+      currentRecordParts.push(text);
+
+      return;
+    }
+
+    // Continuation paragraph.
+    //
+    // The website can put "Message code..." or a WhatsApp link
+    // in a separate paragraph, so append those to the active record.
+    if (currentRecordParts.length > 0) {
+      const looksLikeContact =
+        /message\s*code/i.test(text) ||
+        /whatsapp/i.test(text) ||
+        /wa\.me/i.test(text) ||
+        /\+880[\s-]?1[3-9]/i.test(text) ||
+        /\b01[3-9][\d\s-]{8,12}\b/.test(text);
+
+      if (looksLikeContact) {
+        currentRecordParts.push(text);
+      }
+    }
+  });
+
+  // Final record
+  finalizeCurrentRecord();
 
   return records;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Scraping - Table based
-|--------------------------------------------------------------------------
-|
-| Kept for backward compatibility.
-|--------------------------------------------------------------------------
-*/
+// ============================================================
+// OLD TABLE STRUCTURE
+// ============================================================
 
 function extractTableRecords($) {
   const records = [];
 
-  $(
-    "figure.wp-block-table table, table"
-  ).each((_, table) => {
-    $(table)
-      .find("tbody tr")
-      .each((_, tr) => {
-        const tds = $(tr).find("td");
+  $("figure.wp-block-table table.has-fixed-layout tbody tr").each(
+    (_, tr) => {
+      const tds = $(tr).find("td");
 
-        if (tds.length < 2) {
-          return;
-        }
+      if (tds.length < 2) {
+        return;
+      }
 
-        const code = extractBmsCode(
-          normalizeText(tds.eq(0).text())
-        );
+      const code = normalizeWhitespace(tds.eq(0).text());
+      const description = cleanText(tds.eq(1).text());
 
-        if (!code) {
-          return;
-        }
+      const contact =
+        tds.length >= 3
+          ? extractContact(tds.eq(2).text())
+          : "";
 
-        const description =
-          normalizeText(tds.eq(1).text());
+      const date =
+        tds.length >= 4
+          ? normalizeWhitespace(tds.eq(3).text())
+          : "";
 
-        if (!description) {
-          return;
-        }
+      if (!description) {
+        return;
+      }
 
-        const contactText =
-          tds.length >= 3
-            ? normalizeText(tds.eq(2).text())
-            : "";
+      const extractedCode =
+        extractCode(code) ||
+        extractCode(description);
 
-        const date =
-          tds.length >= 4
-            ? normalizeText(tds.eq(3).text())
-            : "";
+      if (!extractedCode) {
+        return;
+      }
 
-        const contact =
-          extractContact(contactText);
+      const location = extractLocation(description);
 
-        const record = extractRecord(
-          `${code} ${description}`,
-          ""
-        );
+      const fullText = buildFullText(
+        extractedCode,
+        description,
+        contact,
+        date
+      );
 
-        if (!record) {
-          return;
-        }
-
-        if (contact) {
-          record.contact = contact;
-        }
-
-        if (date) {
-          record.date = date;
-        }
-
-        record.fullText = [
-          record.code,
-          record.location
-            ? `Location: ${record.location}`
-            : "",
-          record.description,
-          record.contact
-            ? `Contact: ${record.contact}`
-            : "",
-          record.date
-            ? `Date: ${record.date}`
-            : ""
-        ]
-          .filter(Boolean)
-          .join(" | ");
-
-        records.push(record);
+      records.push({
+        code: extractedCode,
+        location,
+        description,
+        contact,
+        fullText,
       });
+    }
+  );
+
+  return records;
+}
+
+// ============================================================
+// FALLBACK SCRAPER
+// ============================================================
+
+function extractFallbackRecords($) {
+  const records = [];
+
+  $("p").each((_, p) => {
+    const text = normalizeWhitespace($(p).text());
+
+    if (!text) {
+      return;
+    }
+
+    if (!/\bBMS\d+[A-Za-z]?\b/i.test(text)) {
+      return;
+    }
+
+    const record = makeRecord(text);
+
+    if (record) {
+      records.push(record);
+    }
   });
 
   return records;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Deduplication
-|--------------------------------------------------------------------------
-*/
+// ============================================================
+// DEDUPLICATION
+// ============================================================
 
 function deduplicateRecords(records) {
-  const map = new Map();
+  const unique = new Map();
 
   for (const record of records) {
     if (!record || !record.code) {
@@ -592,616 +550,222 @@ function deduplicateRecords(records) {
 
     const code = record.code.toUpperCase();
 
-    const existing = map.get(code);
-
-    if (!existing) {
-      map.set(code, record);
+    // First complete occurrence wins.
+    // If the first one has no contact and a later one does,
+    // replace it with the more complete version.
+    if (!unique.has(code)) {
+      unique.set(code, record);
       continue;
     }
 
-    /*
-     * Keep the richer record.
-     * This also handles duplicate entries such as the same
-     * BMS code appearing more than once on the page.
-     */
+    const existing = unique.get(code);
+
     const existingScore =
-      existing.description.length +
-      (existing.contact ? 50 : 0);
+      (existing.contact ? 2 : 0) +
+      (existing.description ? 1 : 0);
 
     const newScore =
-      record.description.length +
-      (record.contact ? 50 : 0);
+      (record.contact ? 2 : 0) +
+      (record.description ? 1 : 0);
 
     if (newScore > existingScore) {
-      map.set(code, record);
+      unique.set(code, record);
     }
   }
 
-  return [...map.values()];
+  return Array.from(unique.values());
 }
 
-/*
-|--------------------------------------------------------------------------
-| State file
-|--------------------------------------------------------------------------
-*/
+// ============================================================
+// MAIN
+// ============================================================
 
-function loadState() {
-  if (!fs.existsSync(STATE_PATH)) {
-    return {
-      version: 2,
-      entries: {},
-      isNew: true
-    };
-  }
-
+(async () => {
   try {
-    const raw = fs.readFileSync(
-      STATE_PATH,
+    if (
+      !BOT_TOKEN ||
+      BOT_TOKEN === "PUT_YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE"
+    ) {
+      throw new Error(
+        "Please put your NEW Telegram bot token in BOT_TOKEN."
+      );
+    }
+
+    console.log("Fetching tuition website...");
+
+    const html = await fetchWebsiteContent();
+
+    const $ = cheerio.load(html);
+
+    console.log("Scraping tuition updates...");
+
+    // ----------------------------------------------------------
+    // Extract from current paragraph structure
+    // ----------------------------------------------------------
+
+    let records = extractParagraphRecords($);
+
+    console.log(
+      `Paragraph records found: ${records.length}`
+    );
+
+    // ----------------------------------------------------------
+    // Old table structure
+    // ----------------------------------------------------------
+
+    const tableRecords = extractTableRecords($);
+
+    console.log(
+      `Table records found: ${tableRecords.length}`
+    );
+
+    records.push(...tableRecords);
+
+    // ----------------------------------------------------------
+    // Fallback if primary parsing found nothing
+    // ----------------------------------------------------------
+
+    if (records.length === 0) {
+      console.log(
+        "No records found with primary methods, using fallback..."
+      );
+
+      const fallbackRecords =
+        extractFallbackRecords($);
+
+      console.log(
+        `Fallback records found: ${fallbackRecords.length}`
+      );
+
+      records.push(...fallbackRecords);
+    }
+
+    // ----------------------------------------------------------
+    // Deduplicate by BMS code
+    // ----------------------------------------------------------
+
+    records = deduplicateRecords(records);
+
+    console.log(
+      `Unique tuition records found: ${records.length}`
+    );
+
+    // ----------------------------------------------------------
+    // Keyword filtering
+    // ----------------------------------------------------------
+
+    const matchingRecords = records.filter((record) => {
+      const searchText = [
+        record.location,
+        record.description,
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      const matched = containsKeyword(searchText);
+
+      if (matched) {
+        console.log(
+          `Keyword match: ${record.code} | ${record.location}`
+        );
+      }
+
+      return matched;
+    });
+
+    console.log(
+      `Keyword matching records: ${matchingRecords.length}`
+    );
+
+    // ----------------------------------------------------------
+    // New update filtering
+    // ----------------------------------------------------------
+
+    const newUpdates = matchingRecords.filter((record) => {
+      const normalizedFullText =
+        normalizeWhitespace(record.fullText);
+
+      // Exact previous message
+      if (sentTextSet.has(normalizedFullText)) {
+        return false;
+      }
+
+      // Previous versions were stored as complete strings.
+      // Extract code from those strings and avoid sending
+      // the same BMS listing again.
+      if (sentCodeSet.has(record.code)) {
+        return false;
+      }
+
+      return true;
+    });
+
+    console.log(
+      `New matching updates to send: ${newUpdates.length}`
+    );
+
+    // ----------------------------------------------------------
+    // Send to Telegram
+    // ----------------------------------------------------------
+
+    for (const record of newUpdates) {
+      try {
+        console.log(
+          `Sending ${record.code}: ${record.fullText.substring(
+            0,
+            100
+          )}...`
+        );
+
+        await sendTelegramMessage(record.fullText);
+
+        // Save exact message
+        sentUpdates.push(record.fullText);
+
+        // Update in-memory sets immediately so duplicate
+        // records in the same execution cannot be sent twice.
+        sentTextSet.add(
+          normalizeWhitespace(record.fullText)
+        );
+
+        sentCodeSet.add(record.code);
+
+        console.log(
+          `✓ ${record.code} sent successfully`
+        );
+      } catch (sendErr) {
+        console.error(
+          `Failed to send ${record.code}:`,
+          sendErr.response?.data || sendErr.message
+        );
+      }
+    }
+
+    // ----------------------------------------------------------
+    // Save state
+    // ----------------------------------------------------------
+
+    fs.writeFileSync(
+      SENT_UPDATES_PATH,
+      JSON.stringify(sentUpdates, null, 2),
       "utf8"
     );
 
-    const parsed = JSON.parse(raw);
-
-    /*
-     * New format
-     */
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      parsed.version === 2 &&
-      parsed.entries &&
-      typeof parsed.entries === "object"
-    ) {
-      return {
-        ...parsed,
-        isNew: false
-      };
-    }
-
-    /*
-     * Migration from the original format:
-     *
-     * [
-     *   "BMS9234 | ...",
-     *   "BMS9233 | ..."
-     * ]
-     */
-    if (Array.isArray(parsed)) {
-      const entries = {};
-
-      for (const oldItem of parsed) {
-        if (typeof oldItem !== "string") {
-          continue;
-        }
-
-        const code = extractBmsCode(oldItem);
-
-        if (!code) {
-          continue;
-        }
-
-        entries[code] = {
-          fingerprint: sha256(
-            normalizeText(oldItem)
-          ),
-          lastSeen: null,
-          migrated: true
-        };
-      }
-
-      return {
-        version: 2,
-        entries,
-        isNew: false
-      };
-    }
-
-    console.warn(
-      "State file format not recognized. Starting with empty state."
-    );
-
-    return {
-      version: 2,
-      entries: {},
-      isNew: true
-    };
-  } catch (error) {
-    console.warn(
-      "Could not read sent_updates.json:",
-      error.message
-    );
-
-    return {
-      version: 2,
-      entries: {},
-      isNew: true
-    };
-  }
-}
-
-function saveState(state) {
-  const output = {
-    version: 2,
-    entries: state.entries
-  };
-
-  const tempPath =
-    `${STATE_PATH}.tmp`;
-
-  fs.writeFileSync(
-    tempPath,
-    JSON.stringify(output, null, 2),
-    "utf8"
-  );
-
-  /*
-   * Atomic-ish replacement:
-   * write temp first, then rename.
-   */
-  fs.renameSync(
-    tempPath,
-    STATE_PATH
-  );
-}
-
-/*
-|--------------------------------------------------------------------------
-| Telegram
-|--------------------------------------------------------------------------
-*/
-
-async function sendTelegramMessage(message) {
-  const url =
-    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-
-  const chunks = splitTelegramMessage(
-    message,
-    TELEGRAM_MAX_LENGTH
-  );
-
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-
-    try {
-      await axios.post(
-        url,
-        {
-          chat_id: CHAT_ID,
-          text: chunk,
-          disable_web_page_preview: true
-        },
-        {
-          timeout: HTTP_TIMEOUT_MS
-        }
-      );
-    } catch (error) {
-      console.error(
-        "Telegram API error:",
-        error.response?.data ||
-          error.message
-      );
-
-      throw error;
-    }
-
-    if (i < chunks.length - 1) {
-      await sleep(TELEGRAM_DELAY_MS);
-    }
-  }
-}
-
-function splitTelegramMessage(
-  message,
-  maxLength
-) {
-  if (message.length <= maxLength) {
-    return [message];
-  }
-
-  const chunks = [];
-
-  let remaining = message;
-
-  while (remaining.length > maxLength) {
-    let splitAt =
-      remaining.lastIndexOf(
-        "\n",
-        maxLength
-      );
-
-    if (splitAt < 100) {
-      splitAt =
-        remaining.lastIndexOf(
-          " ",
-          maxLength
-        );
-    }
-
-    if (splitAt < 100) {
-      splitAt = maxLength;
-    }
-
-    chunks.push(
-      remaining.slice(0, splitAt)
-    );
-
-    remaining =
-      remaining.slice(splitAt).trimStart();
-  }
-
-  if (remaining.length > 0) {
-    chunks.push(remaining);
-  }
-
-  return chunks;
-}
-
-function formatAlert(record, type) {
-  const title =
-    type === "changed"
-      ? "🔄 Tuition Updated"
-      : "🔔 New Tuition Alert";
-
-  const lines = [
-    title,
-    "",
-    `Code: ${record.code}`
-  ];
-
-  if (record.location) {
-    lines.push(
-      `Location: ${record.location}`
-    );
-  }
-
-  lines.push(
-    `Details: ${record.description}`
-  );
-
-  if (record.contact) {
-    lines.push(
-      `Contact: ${record.contact}`
-    );
-  }
-
-  lines.push(
-    "",
-    `Source: ${TARGET_URL}`
-  );
-
-  return lines.join("\n");
-}
-
-/*
-|--------------------------------------------------------------------------
-| Main
-|--------------------------------------------------------------------------
-*/
-
-async function main() {
-  console.log(
-    "========================================"
-  );
-  console.log(
-    " Dhaka Tuition Alert"
-  );
-  console.log(
-    "========================================"
-  );
-
-  console.log(
-    `Target: ${TARGET_URL}`
-  );
-
-  console.log(
-    `Started: ${new Date().toISOString()}`
-  );
-
-  /*
-   * Load current state.
-   */
-  const state = loadState();
-
-  /*
-   * Fetch page.
-   */
-  console.log(
-    "Fetching website..."
-  );
-
-  const html =
-    await fetchWebsiteContent();
-
-  console.log(
-    `Downloaded ${html.length} bytes.`
-  );
-
-  /*
-   * Parse HTML.
-   */
-  const $ = cheerio.load(html);
-
-  /*
-   * Extract from current paragraph format.
-   */
-  const paragraphRecords =
-    extractParagraphRecords($);
-
-  console.log(
-    `Paragraph records: ${paragraphRecords.length}`
-  );
-
-  /*
-   * Extract old table format too.
-   */
-  const tableRecords =
-    extractTableRecords($);
-
-  console.log(
-    `Table records: ${tableRecords.length}`
-  );
-
-  /*
-   * Merge.
-   */
-  const allRecords = [
-    ...paragraphRecords,
-    ...tableRecords
-  ];
-
-  /*
-   * Deduplicate by BMS code.
-   */
-  const uniqueRecords =
-    deduplicateRecords(allRecords);
-
-  console.log(
-    `Unique BMS records: ${uniqueRecords.length}`
-  );
-
-  /*
-   * Find matching locations.
-   */
-  const matchingRecords =
-    uniqueRecords.filter(matchesKeyword);
-
-  console.log(
-    `Keyword matches: ${matchingRecords.length}`
-  );
-
-  /*
-   * Debug output.
-   */
-  for (const record of matchingRecords) {
     console.log(
-      `[MATCH] ${record.code} | ${record.location}`
-    );
-  }
-
-  /*
-   * First run:
-   *
-   * Default behavior is to establish a baseline
-   * without sending all historical listings.
-   */
-  if (state.isNew && !SEND_EXISTING_ON_FIRST_RUN) {
-    console.log(
-      "No existing state detected."
+      `✓ Sent ${newUpdates.length} new update(s).`
     );
 
-    console.log(
-      "Creating baseline without sending existing matches."
-    );
-
-    const now =
-      new Date().toISOString();
-
-    for (const record of uniqueRecords) {
-      state.entries[record.code] = {
-        fingerprint: sha256(
-          normalizeText(record.fullText)
-        ),
-        lastSeen: now,
-        location: record.location
-      };
-    }
-
-    saveState(state);
-
-    console.log(
-      `Baseline created with ${uniqueRecords.length} records.`
-    );
-
-    console.log(
-      "Future runs will alert only on new matching records."
-    );
-
-    return;
-  }
-
-  /*
-   * Process alerts.
-   */
-  const alerts = [];
-
-  const now =
-    new Date().toISOString();
-
-  for (const record of uniqueRecords) {
-    const code =
-      record.code.toUpperCase();
-
-    const fingerprint =
-      sha256(
-        normalizeText(record.fullText)
-      );
-
-    const previous =
-      state.entries[code];
-
-    /*
-     * Brand-new BMS code.
-     */
-    if (!previous) {
-      if (matchesKeyword(record)) {
-        alerts.push({
-          record,
-          type: "new"
-        });
-      }
-
-      state.entries[code] = {
-        fingerprint,
-        lastSeen: now,
-        location: record.location
-      };
-
-      continue;
-    }
-
-    /*
-     * Existing record changed.
-     */
-    if (
-      ALERT_ON_CHANGE &&
-      previous.fingerprint !== fingerprint &&
-      matchesKeyword(record)
-    ) {
-      alerts.push({
-        record,
-        type: "changed"
-      });
-    }
-
-    /*
-     * Always update state with newest content.
-     */
-    state.entries[code] = {
-      fingerprint,
-      lastSeen: now,
-      location: record.location
-    };
-  }
-
-  /*
-   * Cleanup:
-   *
-   * If old BMS records disappear from the page for a long time,
-   * don't immediately delete them. This prevents re-alerting if
-   * the website temporarily fails to show older records.
-   *
-   * Instead, keep them indefinitely.
-   */
-
-  console.log(
-    `Alerts to send: ${alerts.length}`
-  );
-
-  /*
-   * Send alerts.
-   */
-  let sentCount = 0;
-
-  for (const alert of alerts) {
-    const message =
-      formatAlert(
-        alert.record,
-        alert.type
-      );
-
-    console.log(
-      `Sending ${alert.type}: ${alert.record.code}`
-    );
-
-    try {
-      await sendTelegramMessage(
-        message
-      );
-
-      sentCount++;
-
+    if (newUpdates.length === 0) {
       console.log(
-        `✓ Sent ${alert.record.code}`
-      );
-    } catch (error) {
-      /*
-       * Important:
-       *
-       * Do NOT remove the record from state here.
-       * However, because the state was already updated above,
-       * a failed Telegram send would otherwise never retry.
-       *
-       * Restore old state for this code so the next run
-       * can try again.
-       */
-      const code =
-        alert.record.code.toUpperCase();
-
-      if (
-        alert.type === "new"
-      ) {
-        delete state.entries[code];
-      }
-
-      console.error(
-        `✗ Failed to send ${code}`
+        "No new matching tuition updates found."
       );
     }
-
-    await sleep(
-      TELEGRAM_DELAY_MS
+  } catch (error) {
+    console.error(
+      "Scraper error:",
+      error.response?.data || error.message
     );
+
+    process.exitCode = 1;
   }
-
-  /*
-   * Save state only after processing.
-   */
-  saveState(state);
-
-  console.log(
-    "----------------------------------------"
-  );
-  console.log(
-    `Total records: ${uniqueRecords.length}`
-  );
-  console.log(
-    `Matching records: ${matchingRecords.length}`
-  );
-  console.log(
-    `Alerts sent: ${sentCount}`
-  );
-  console.log(
-    `Finished: ${new Date().toISOString()}`
-  );
-  console.log(
-    "----------------------------------------"
-  );
-}
-
-/*
-|--------------------------------------------------------------------------
-| Global error handler
-|--------------------------------------------------------------------------
-*/
-
-main().catch((error) => {
-  console.error(
-    "========================================"
-  );
-  console.error(
-    "FATAL ERROR"
-  );
-  console.error(
-    "========================================"
-  );
-
-  console.error(
-    error.response?.data ||
-      error.stack ||
-      error.message ||
-      error
-  );
-
-  process.exit(1);
-});
+})();
