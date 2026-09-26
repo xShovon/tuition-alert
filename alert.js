@@ -10,7 +10,7 @@ const path = require("path");
 // IMPORTANT:
 // The previous bot token was exposed. Generate a NEW token using
 // @BotFather and put the new token below.
-const BOT_TOKEN = "7453745620";
+const BOT_TOKEN = "7453745620:AAGcFqCnxXgJsgWguvtIsjQCw3krqtWdOac";
 const CHAT_ID = "5659693980";
 
 const TARGET_URL = "https://dhakatuitionbd.com/bm/";
